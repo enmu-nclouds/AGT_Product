@@ -1,8 +1,11 @@
+// Factory Sensor Monitor — Main CDK Stack
+// Orchestrates: AmplifyHostingStack, CognitoStack, BackendStack (factory-extended).
+// AgentCore Runtime / Memory outputs removed — replaced by FactoryApiUrl.
+
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
 import { AppConfig } from "./utils/config-manager"
 
-// Import nested stacks
 import { BackendStack } from "./backend-stack"
 import { AmplifyHostingStack } from "./amplify-hosting-stack"
 import { CognitoStack } from "./cognito-stack"
@@ -18,20 +21,21 @@ export class FastMainStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: FastAmplifyStackProps) {
     const description =
-      "Fullstack AgentCore Solution Template - Main Stack (v0.4.1) (uksb-v6dos0t5g8)"
+      "Factory Sensor Monitor — Main Stack (based on FAST v0.4.1, AgentCore removed)"
     super(scope, id, { ...props, description })
 
-    // Step 1: Create the Amplify stack to get the predictable domain
+    // 1. Amplify hosting (creates the predictable frontend domain)
     this.amplifyHostingStack = new AmplifyHostingStack(this, `${id}-amplify`, {
       config: props.config,
     })
 
+    // 2. Cognito (needs Amplify URL for callback allowlist)
     this.cognitoStack = new CognitoStack(this, `${id}-cognito`, {
       config: props.config,
       callbackUrls: ["http://localhost:3000", this.amplifyHostingStack.amplifyUrl],
     })
 
-    // Step 2: Create backend stack with the predictable Amplify URL and Cognito details
+    // 3. Backend (needs Cognito IDs + Amplify URL for CORS)
     this.backendStack = new BackendStack(this, `${id}-backend`, {
       config: props.config,
       userPoolId: this.cognitoStack.userPoolId,
@@ -40,11 +44,28 @@ export class FastMainStack extends cdk.Stack {
       frontendUrl: this.amplifyHostingStack.amplifyUrl,
     })
 
-    // Outputs
+    // ── Outputs ───────────────────────────────────────────────────────────────
+
     new cdk.CfnOutput(this, "AmplifyAppId", {
       value: this.amplifyHostingStack.amplifyApp.appId,
-      description: "Amplify App ID - use this for manual deployment",
+      description: "Amplify App ID — use for manual frontend deployment",
       exportName: `${props.config.stack_name_base}-AmplifyAppId`,
+    })
+
+    new cdk.CfnOutput(this, "AmplifyUrl", {
+      value: this.amplifyHostingStack.amplifyUrl,
+      description: "Amplify frontend URL (live after first deploy)",
+    })
+
+    new cdk.CfnOutput(this, "AmplifyConsoleUrl", {
+      value: `https://console.aws.amazon.com/amplify/apps/${this.amplifyHostingStack.amplifyApp.appId}`,
+      description: "Amplify console URL for monitoring deployments",
+    })
+
+    new cdk.CfnOutput(this, "StagingBucketName", {
+      value: this.amplifyHostingStack.stagingBucket.bucketName,
+      description: "S3 bucket for Amplify deployment staging",
+      exportName: `${props.config.stack_name_base}-StagingBucket`,
     })
 
     new cdk.CfnOutput(this, "CognitoUserPoolId", {
@@ -61,42 +82,20 @@ export class FastMainStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "CognitoDomain", {
       value: `${this.cognitoStack.userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com`,
-      description: "Cognito Domain for OAuth",
+      description: "Cognito OAuth domain",
       exportName: `${props.config.stack_name_base}-CognitoDomain`,
-    })
-
-    new cdk.CfnOutput(this, "RuntimeArn", {
-      value: this.backendStack.runtimeArn,
-      description: "AgentCore Runtime ARN",
-      exportName: `${props.config.stack_name_base}-RuntimeArn`,
-    })
-
-    new cdk.CfnOutput(this, "MemoryArn", {
-      value: this.backendStack.memoryArn,
-      description: "AgentCore Memory ARN",
-      exportName: `${props.config.stack_name_base}-MemoryArn`,
     })
 
     new cdk.CfnOutput(this, "FeedbackApiUrl", {
       value: this.backendStack.feedbackApiUrl,
-      description: "Feedback API Gateway URL",
+      description: "Feedback API Gateway URL (kept from FAST baseline)",
       exportName: `${props.config.stack_name_base}-FeedbackApiUrl`,
     })
 
-    new cdk.CfnOutput(this, "AmplifyConsoleUrl", {
-      value: `https://console.aws.amazon.com/amplify/apps/${this.amplifyHostingStack.amplifyApp.appId}`,
-      description: "Amplify Console URL for monitoring deployments",
-    })
-
-    new cdk.CfnOutput(this, "AmplifyUrl", {
-      value: this.amplifyHostingStack.amplifyUrl,
-      description: "Amplify Frontend URL (available after deployment)",
-    })
-
-    new cdk.CfnOutput(this, "StagingBucketName", {
-      value: this.amplifyHostingStack.stagingBucket.bucketName,
-      description: "S3 bucket for Amplify deployment staging",
-      exportName: `${props.config.stack_name_base}-StagingBucket`,
+    new cdk.CfnOutput(this, "FactoryApiUrl", {
+      value: this.backendStack.factoryApiUrl,
+      description: "Factory sensor monitoring API URL — set as VITE_API_URL in frontend",
+      exportName: `${props.config.stack_name_base}-FactoryApiUrl`,
     })
   }
 }

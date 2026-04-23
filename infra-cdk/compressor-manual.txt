@@ -1,0 +1,128 @@
+MACHINE MANUAL — COMPRESSOR-01 (Reciprocating Air Compressor)
+Version: 2.7  |  Site: Acme Manufacturing Plant, Unit B  |  Date: 2024-01
+
+=============================================================================
+1. MACHINE OVERVIEW
+=============================================================================
+Compressor-01 is a two-stage reciprocating air compressor supplying instrument
+air to the pneumatic control system at up to 8.5 bar gauge. Drive motor: 55 kW,
+3-phase, 1480 RPM, direct-coupled via flexible coupling. Delivery capacity:
+35 m³/min FAD at 7 bar. Interstage cooling via an aftercooler and moisture
+separator.
+
+=============================================================================
+2. NORMAL OPERATING RANGES
+=============================================================================
+  Cylinder head temperature (stage 1):  80–110°C
+  Cylinder head temperature (stage 2):  90–120°C
+  Vibration (frame, RMS):               0.8–2.8 mm/s
+  Discharge pressure (instrument air):  7.0–8.5 bar
+  Interstage pressure:                  2.8–3.4 bar
+  RPM:                                  1450–1510
+  Lube oil pressure:                    2.0–3.5 bar
+  Lube oil temperature:                 65–85°C
+
+Warning thresholds:
+  Any cylinder head temp > 130°C — check valve condition and intercooler flow
+  Vibration > 4.0 mm/s — inspect valve plates and piston rings
+  Lube oil pressure < 1.5 bar — shut down; risk of bearing damage
+  Discharge pressure > 9.0 bar — safety relief valve should lift; investigate
+
+Critical (shut down immediately):
+  Cylinder head temp > 150°C
+  Vibration > 6.5 mm/s
+  Lube oil pressure < 1.0 bar
+  Any knocking or metallic impact noise from cylinders
+
+=============================================================================
+3. MAINTENANCE SCHEDULE
+=============================================================================
+Weekly:
+  - Check and drain moisture separator and aftercooler drain traps
+  - Record cylinder head temps, frame vibration, and lube oil pressure
+  - Inspect V-belt tension (deflection < 15 mm under 10 N load) — if belt-driven
+  - Verify auto-drain solenoids are cycling (check timer light on panel)
+
+Monthly:
+  - Change lube oil filter element (P/N: LF-9011-OEM)
+  - Inspect suction and discharge valve plates; replace if pitting visible
+  - Check piston rod packing for excessive blow-by (max 2% leakage rate)
+  - Calibrate unloader solenoids and verify no-load start cycle
+
+Annual:
+  - Full valve overhaul — replace all valve plates and seats
+    (Stage 1: P/N VK-S1-C01 / Stage 2: P/N VK-S2-C01)
+  - Replace piston rings and rider rings (P/N: PR-63MM-PTFE)
+  - Drain, flush, and refill crankcase with ISO VG100 mineral oil (12 L)
+  - Hydrostatic test of interstage piping at 1.5× design pressure
+  - Motor megger test (min 50 MΩ at 1000 V DC)
+  - Replace coupling flexible element (P/N: FE-OMEGA-10)
+
+=============================================================================
+4. TROUBLESHOOTING
+=============================================================================
+
+4.1 High Cylinder Head Temperature (> 130°C)
+  Likely causes:
+    a) Fouled or failed discharge valve — valve not opening fully, gas re-expansion
+    b) Blocked intercooler — scale buildup reducing heat transfer
+    c) High ambient temperature combined with high load
+    d) Incorrect valve clearance (re-seat gap out of spec)
+  Steps:
+    1. Reduce load to 60% via unloader solenoid and monitor for 5 minutes.
+    2. Check intercooler coolant flow (should be > 8 L/min).
+    3. If temp does not drop to < 110°C within 10 minutes, shut down.
+    4. Remove and inspect cylinder head valve plate; replace if worn
+       (Stage 1 kit: P/N VK-S1-C01).
+
+4.2 High Vibration (> 4.0 mm/s)
+  Likely causes:
+    a) Loose flywheel or coupling bolts
+    b) Worn piston rod bearing (small-end bush)
+    c) Cracked or broken valve plate causing asymmetric loading
+    d) Foundation bolt loosening
+  Steps:
+    1. Perform a bolted-joint check on all frame and foundation bolts (45 Nm).
+    2. Listen for regular knocking (= broken valve) or irregular knock (= bearing).
+    3. Shut down and inspect crankcase for metal debris via sight glass.
+    4. If debris found, do not restart; engage maintenance team for major overhaul.
+
+4.3 Low Discharge Pressure (< 7.0 bar) — System Not Meeting Demand
+  Likely causes:
+    a) Excessive demand (other system leak)
+    b) Worn piston rings — reduced volumetric efficiency
+    c) Leaking discharge valve
+  Steps:
+    1. Check for air leaks on the distribution header; listen with ultrasonic detector.
+    2. Perform a simple volumetric efficiency test: close the receiver outlet,
+       time how long it takes to build from 0 to 8 bar (should be < 4 minutes).
+    3. If efficiency is low, replace piston rings at next planned outage.
+
+=============================================================================
+5. SPARE PARTS LIST
+=============================================================================
+  P/N VK-S1-C01       Stage 1 valve kit (suction + discharge plates)
+  P/N VK-S2-C01       Stage 2 valve kit (suction + discharge plates)
+  P/N PR-63MM-PTFE    Piston ring set (per cylinder, 4 rings each)
+  P/N LF-9011-OEM     Lube oil filter element
+  P/N FE-OMEGA-10     Flexible coupling element
+  P/N MSD-125-BSP     Moisture separator drain assembly
+  P/N ORS-10-NBR      O-ring service kit (crankcase covers)
+
+=============================================================================
+6. SHUTDOWN PROCEDURE
+=============================================================================
+Controlled shutdown:
+  1. Energise the unloader solenoid to place the compressor on no-load.
+  2. Run on no-load for 3 minutes to cool cylinder heads.
+  3. Stop motor via main isolator or MCC contactor.
+  4. Close the receiver outlet isolating valve.
+  5. Vent receiver pressure to zero via drain valve before any maintenance.
+  6. Lock out / tag out per SOP-LOTO-002.
+
+Emergency stop:
+  1. Hit the ESTOP pushbutton at the local panel.
+  2. Inform the control room immediately.
+  3. Do NOT vent or open any pressurised component until system is fully at rest
+     and pressure is confirmed zero on local gauge.
+  4. Incident log must be completed within 1 hour (see general-safety-procedures).

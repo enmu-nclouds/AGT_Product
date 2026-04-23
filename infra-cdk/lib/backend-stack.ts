@@ -1,24 +1,25 @@
+// Factory Sensor Monitor — Backend Stack
+// Replaces AgentCore-specific resources with factory sensor monitoring infrastructure.
+// Kept from FAST baseline: Feedback DynamoDB table, Feedback API, Cognito SSM params.
+// Added: S3 buckets, Kinesis stream, DynamoDB readings table, 5 Lambda functions, REST API.
+
 import * as cdk from "aws-cdk-lib"
 import * as cognito from "aws-cdk-lib/aws-cognito"
-import * as ec2 from "aws-cdk-lib/aws-ec2"
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as ssm from "aws-cdk-lib/aws-ssm"
-import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager"
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb"
 import * as apigateway from "aws-cdk-lib/aws-apigateway"
 import * as logs from "aws-cdk-lib/aws-logs"
 import * as s3 from "aws-cdk-lib/aws-s3"
-import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha"
-import * as bedrockagentcore from "aws-cdk-lib/aws-bedrockagentcore"
-import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha"
+import * as kinesis from "aws-cdk-lib/aws-kinesis"
 import * as lambda from "aws-cdk-lib/aws-lambda"
-import * as ecr_assets from "aws-cdk-lib/aws-ecr-assets"
-import * as cr from "aws-cdk-lib/custom-resources"
+import * as lambda_events from "aws-cdk-lib/aws-lambda-event-sources"
+// PythonFunction removed: it requires Docker at synth time to bundle pip deps.
+// The feedback Lambda only uses the Powertools layer (which already bundles pydantic),
+// so a plain lambda.Function + fromAsset() is sufficient and Docker-free.
 import { Construct } from "constructs"
 import { AppConfig } from "./utils/config-manager"
-import { AgentCoreRole } from "./utils/agentcore-role"
 import * as path from "path"
-import * as fs from "fs"
 
 export interface BackendStackProps extends cdk.NestedStackProps {
   config: AppConfig
@@ -33,407 +34,303 @@ export class BackendStack extends cdk.NestedStack {
   public readonly userPoolClientId: string
   public readonly userPoolDomain: cognito.UserPoolDomain
   public feedbackApiUrl: string
-  public runtimeArn: string
-  public memoryArn: string
-  private agentName: cdk.CfnParameter
+  public factoryApiUrl: string
   private userPool: cognito.IUserPool
-  private machineClient: cognito.UserPoolClient
-  private machineClientSecret: secretsmanager.Secret
-  private runtimeCredentialProvider: cdk.CustomResource
-  private agentRuntime: agentcore.Runtime
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props)
 
-    // Store the Cognito values
     this.userPoolId = props.userPoolId
     this.userPoolClientId = props.userPoolClientId
     this.userPoolDomain = props.userPoolDomain
 
-    // Import the Cognito resources from the other stack
     this.userPool = cognito.UserPool.fromUserPoolId(
       this,
-      "ImportedUserPoolForBackend",
+      "ImportedUserPool",
       props.userPoolId
     )
-    // then create the user pool client
-    cognito.UserPoolClient.fromUserPoolClientId(
-      this,
-      "ImportedUserPoolClient",
-      props.userPoolClientId
-    )
 
-    // Create Machine-to-Machine authentication components
-    this.createMachineAuthentication(props.config)
-
-    // DEPLOYMENT ORDER EXPLANATION:
-    // 1. Cognito User Pool & Client (created in separate CognitoStack)
-    // 2. Machine Client & Resource Server (created above for M2M auth)
-    // 3. AgentCore Gateway (created next - uses machine client for auth)
-    // 4. AgentCore Runtime (created last - independent of gateway)
-    //
-    // This order ensures that authentication components are available before
-    // the gateway that depends on them, while keeping the runtime separate
-    // since it doesn't directly depend on the gateway.
-
-    // Create AgentCore Gateway (before Runtime)
-    this.createAgentCoreGateway(props.config)
-
-    // Create AgentCore Runtime resources
-    this.createAgentCoreRuntime(props.config)
-
-    // Store runtime ARN in SSM for frontend stack
-    this.createRuntimeSSMParameters(props.config)
-
-    // Store Cognito configuration in SSM for testing and frontend
+    // Store Cognito config in SSM for scripts / runtime access
     this.createCognitoSSMParameters(props.config)
 
-    // Create Feedback DynamoDB table (example of application data storage)
+    // ── FAST baseline: Feedback system (kept as-is) ──────────────────────────
     const feedbackTable = this.createFeedbackTable(props.config)
-
-    // Create API Gateway Feedback API resources (example of best-practice API Gateway + Lambda
-    // pattern)
     this.createFeedbackApi(props.config, props.frontendUrl, feedbackTable)
+
+    // ── Factory sensor monitoring resources ───────────────────────────────────
+    this.createFactoryResources(props.config)
   }
 
-  private createAgentCoreRuntime(config: AppConfig): void {
-    const pattern = config.backend?.pattern || "strands-single-agent"
+  // ── Factory resources ────────────────────────────────────────────────────────
 
-    // Parameters
-    this.agentName = new cdk.CfnParameter(this, "AgentName", {
-      type: "String",
-      default: "FASTAgent",
-      description: "Name for the agent runtime",
+  private createFactoryResources(config: AppConfig): void {
+    // S3: raw sensor batches from the generator Lambda
+    const rawBucket = new s3.Bucket(this, "SensorRawBucket", {
+      bucketName: `factory-sensor-raw-${this.account}-${this.region}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     })
 
-    const stack = cdk.Stack.of(this)
-    const deploymentType = config.backend.deployment_type
+    // S3: machine manuals / knowledge base source documents
+    const kbBucket = new s3.Bucket(this, "SensorKnowledgebaseBucket", {
+      bucketName: `factory-sensor-knowledgebase-${this.account}-${this.region}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    })
 
-    // Create the agent runtime artifact based on deployment type
-    let agentRuntimeArtifact: agentcore.AgentRuntimeArtifact
-    let zipPackagerResource: cdk.CustomResource | undefined
+    // Kinesis Data Stream — 1 shard, receives individual sensor records
+    const sensorStream = new kinesis.Stream(this, "SensorStream", {
+      streamName: "factory-sensor-stream",
+      shardCount: 1,
+      retentionPeriod: cdk.Duration.hours(24),
+    })
 
-    if (
-      deploymentType === "zip" &&
-      (pattern === "claude-agent-sdk-single-agent" || pattern === "claude-agent-sdk-multi-agent")
-    ) {
-      throw new Error(
-        "claude-agent-sdk patterns require Docker deployment (deployment_type: docker) " +
-          "because they need Node.js and the claude-code CLI installed at build time."
-      )
-    }
+    // DynamoDB: sensor readings (PK: machine_id, SK: timestamp, TTL: ttl)
+    const readingsTable = new dynamodb.Table(this, "SensorReadingsTable", {
+      tableName: "factory-sensor-readings",
+      partitionKey: { name: "machine_id", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    })
 
-    if (deploymentType === "zip") {
-      // ZIP DEPLOYMENT: Use Lambda to package and upload to S3 (no Docker required)
-      const repoRoot = path.resolve(__dirname, "..", "..") // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      const patternDir = path.join(repoRoot, "patterns", pattern) // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+    // Broad Lambda execution role for POC — gives full access to DynamoDB, Kinesis, S3, Bedrock
+    const lambdaRole = new iam.Role(this, "FactoryLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonDynamoDBFullAccess"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonKinesisFullAccess"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonS3FullAccess"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonBedrockFullAccess"),
+      ],
+    })
 
-      // Create S3 bucket for agent code
-      const agentCodeBucket = new s3.Bucket(this, "AgentCodeBucket", {
+    // ── Lambda: sensor-data-generator ────────────────────────────────────────
+    // Triggered by POST /generate — creates 20 synthetic readings, sends to Kinesis + S3
+    const generatorFn = new lambda.Function(this, "SensorDataGenerator", {
+      functionName: "sensor-data-generator",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "..", "lambdas", "sensor-data-generator") // nosemgrep
+      ),
+      role: lambdaRole,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        KINESIS_STREAM_NAME: sensorStream.streamName,
+        S3_RAW_BUCKET: rawBucket.bucketName,
+      },
+      logGroup: new logs.LogGroup(this, "GeneratorLogGroup", {
+        logGroupName: "/aws/lambda/sensor-data-generator",
+        retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
-        autoDeleteObjects: true,
-        versioned: true,
-        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      })
-
-      // Lambda to package agent code
-      const packagerLambda = new lambda.Function(this, "ZipPackagerLambda", {
-        runtime: lambda.Runtime.PYTHON_3_12,
-        handler: "index.handler",
-        code: lambda.Code.fromAsset(path.join(__dirname, "..", "lambdas", "zip-packager")), // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        timeout: cdk.Duration.minutes(10),
-        memorySize: 1024,
-        ephemeralStorageSize: cdk.Size.gibibytes(2),
-      })
-
-      agentCodeBucket.grantReadWrite(packagerLambda)
-
-      // Read agent code files and encode as base64
-      const agentCode: Record<string, string> = {}
-
-      // Read pattern .py files
-      for (const file of fs.readdirSync(patternDir)) {
-        if (file.endsWith(".py")) {
-          const content = fs.readFileSync(path.join(patternDir, file)) // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-          agentCode[file] = content.toString("base64")
-        }
-      }
-
-      // Read shared modules (gateway/, tools/)
-      for (const module of ["gateway", "tools"]) {
-        const moduleDir = path.join(repoRoot, module) // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        if (fs.existsSync(moduleDir)) {
-          this.readDirRecursive(moduleDir, module, agentCode)
-        }
-      }
-
-      // Read requirements
-      const requirementsPath = path.join(patternDir, "requirements.txt") // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      const requirements = fs
-        .readFileSync(requirementsPath, "utf-8")
-        .split("\n")
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith("#"))
-
-      // Create hash for change detection
-      // We use this to trigger update when content changes
-      const contentHash = this.hashContent(JSON.stringify({ requirements, agentCode }))
-
-      // Custom Resource to trigger packaging
-      const provider = new cr.Provider(this, "ZipPackagerProvider", {
-        onEventHandler: packagerLambda,
-      })
-
-      zipPackagerResource = new cdk.CustomResource(this, "ZipPackager", {
-        serviceToken: provider.serviceToken,
-        properties: {
-          BucketName: agentCodeBucket.bucketName,
-          ObjectKey: "deployment_package.zip",
-          Requirements: requirements,
-          AgentCode: agentCode,
-          ContentHash: contentHash,
-        },
-      })
-
-      // Store bucket name in SSM for updates
-      new ssm.StringParameter(this, "AgentCodeBucketNameParam", {
-        parameterName: `/${config.stack_name_base}/agent-code-bucket`,
-        stringValue: agentCodeBucket.bucketName,
-        description: "S3 bucket for agent code deployment packages",
-      })
-
-      agentRuntimeArtifact = agentcore.AgentRuntimeArtifact.fromS3(
-        {
-          bucketName: agentCodeBucket.bucketName,
-          objectKey: "deployment_package.zip",
-        },
-        agentcore.AgentCoreRuntime.PYTHON_3_12,
-        ["opentelemetry-instrument", "basic_agent.py"]
-      )
-    } else {
-      // DOCKER DEPLOYMENT: Use container-based deployment
-      agentRuntimeArtifact = agentcore.AgentRuntimeArtifact.fromAsset(
-        path.resolve(__dirname, "..", ".."), // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        {
-          platform: ecr_assets.Platform.LINUX_ARM64,
-          file: `patterns/${pattern}/Dockerfile`,
-        }
-      )
-    }
-
-    // Configure network mode based on config.yaml settings.
-    // PUBLIC: Runtime is accessible over the public internet (default).
-    // VPC: Runtime is deployed into a user-provided VPC for private network isolation.
-    //      The user must ensure their VPC has the necessary VPC endpoints for AWS services.
-    //      See docs/DEPLOYMENT.md for the full list of required VPC endpoints.
-    const networkConfiguration = this.buildNetworkConfiguration(config)
-
-    // Configure JWT authorizer with Cognito
-    const authorizerConfiguration = agentcore.RuntimeAuthorizerConfiguration.usingJWT(
-      `https://cognito-idp.${stack.region}.amazonaws.com/${this.userPoolId}/.well-known/openid-configuration`,
-      [this.userPoolClientId]
-    )
-
-    // Create AgentCore execution role
-    const agentRole = new AgentCoreRole(this, "AgentCoreRole")
-
-    // Create memory resource with short-term memory (conversation history) as default
-    // To enable long-term strategies (summaries, preferences, facts), see docs/MEMORY_INTEGRATION.md
-    const memory = new cdk.CfnResource(this, "AgentMemory", {
-      type: "AWS::BedrockAgentCore::Memory",
-      properties: {
-        Name: cdk.Names.uniqueResourceName(this, { maxLength: 48 }),
-        EventExpiryDuration: 30,
-        Description: `Short-term memory for ${config.stack_name_base} agent`,
-        MemoryStrategies: [
-          {
-            // Extracts and stores factual information shared by the user across sessions.
-            // Stored under /facts/{actorId} — retrieved on each turn to personalise responses.
-            SemanticMemoryStrategy: {
-              Name: "FactExtractor",
-              Namespaces: ["/facts/{actorId}"],
-            },
-          },
-        ],
-        MemoryExecutionRoleArn: agentRole.roleArn,
-        Tags: {
-          Name: `${config.stack_name_base}_Memory`,
-          ManagedBy: "CDK",
-        },
-      },
-    })
-    const memoryId = memory.getAtt("MemoryId").toString()
-    const memoryArn = memory.getAtt("MemoryArn").toString()
-
-    // Store the memory ARN for access from main stack
-    this.memoryArn = memoryArn
-
-    // Add memory-specific permissions to agent role
-    agentRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "MemoryResourceAccess",
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateEvent",
-          "bedrock-agentcore:GetEvent",
-          "bedrock-agentcore:ListEvents",
-          "bedrock-agentcore:RetrieveMemoryRecords", // Only needed for long-term strategies
-        ],
-        resources: [memoryArn],
-      })
-    )
-
-    // Add SSM permissions for AgentCore Gateway URL lookup
-    agentRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "SSMParameterAccess",
-        effect: iam.Effect.ALLOW,
-        actions: ["ssm:GetParameter", "ssm:GetParameters"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/${config.stack_name_base}/*`,
-        ],
-      })
-    )
-
-    // Add Code Interpreter permissions
-    agentRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "CodeInterpreterAccess",
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:StartCodeInterpreterSession",
-          "bedrock-agentcore:StopCodeInterpreterSession",
-          "bedrock-agentcore:InvokeCodeInterpreter",
-        ],
-        resources: [`arn:aws:bedrock-agentcore:${this.region}:aws:code-interpreter/*`],
-      })
-    )
-
-    // Add OAuth2 Credential Provider access for AgentCore Runtime
-    // The @requires_access_token decorator performs a two-stage process:
-    // 1. GetOauth2CredentialProvider - Looks up provider metadata (ARN, vendor config, grant types)
-    // 2. GetResourceOauth2Token - Uses metadata to fetch the actual access token from Token Vault
-    agentRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "OAuth2CredentialProviderAccess",
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:GetOauth2CredentialProvider",
-          "bedrock-agentcore:GetResourceOauth2Token",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:oauth2-credential-provider/*`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/*`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/*`,
-        ],
-      })
-    )
-
-    // Add Secrets Manager access for OAuth2
-    // AgentCore Runtime needs to read two secrets:
-    // 1. Machine client secret (created by CDK)
-    // 2. Token Vault OAuth2 secret (created by AgentCore Identity)
-    agentRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "SecretsManagerOAuth2Access",
-        effect: iam.Effect.ALLOW,
-        actions: ["secretsmanager:GetSecretValue"],
-        resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${config.stack_name_base}/machine_client_secret*`,
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!default/oauth2/${config.stack_name_base}-runtime-gateway-auth*`,
-        ],
-      })
-    )
-
-    // Environment variables for the runtime
-    const envVars: { [key: string]: string } = {
-      AWS_REGION: stack.region,
-      AWS_DEFAULT_REGION: stack.region,
-      MEMORY_ID: memoryId,
-      STACK_NAME: config.stack_name_base,
-      GATEWAY_CREDENTIAL_PROVIDER_NAME: `${config.stack_name_base}-runtime-gateway-auth`, // Used by @requires_access_token decorator to look up the correct provider
-      // Controls whether the agent activates long-term semantic memory retrieval.
-      // The memory resource always includes the SemanticMemoryStrategy (no cost to define it),
-      // but retrieval is only performed when this is "true". See config.yaml: use_long_term_memory.
-      USE_LONG_TERM_MEMORY: config.backend.use_long_term_memory ? "true" : "false",
-      // Retrieval tuning for long-term memory. Only used when USE_LONG_TERM_MEMORY is "true".
-      // See config.yaml: ltm_top_k and ltm_relevance_score.
-      LTM_TOP_K: String(config.backend.ltm_top_k),
-      LTM_RELEVANCE_SCORE: String(config.backend.ltm_relevance_score),
-    }
-
-    // Add claude-agent-sdk specific environment variable
-    if (pattern === "claude-agent-sdk-single-agent" || pattern === "claude-agent-sdk-multi-agent") {
-      envVars["CLAUDE_CODE_USE_BEDROCK"] = "1"
-    }
-
-    // Create the runtime using L2 construct
-    // requestHeaderConfiguration allows the agent to read the Authorization header
-    // from RequestContext.request_headers, which is needed to securely extract the
-    // user ID from the validated JWT token (sub claim) instead of trusting the payload body.
-    this.agentRuntime = new agentcore.Runtime(this, "Runtime", {
-      runtimeName: `${config.stack_name_base.replace(/-/g, "_")}_${this.agentName.valueAsString}`,
-      agentRuntimeArtifact: agentRuntimeArtifact,
-      executionRole: agentRole,
-      networkConfiguration: networkConfiguration,
-      protocolConfiguration: agentcore.ProtocolType.HTTP,
-      environmentVariables: envVars,
-      authorizerConfiguration: authorizerConfiguration,
-      requestHeaderConfiguration: {
-        allowlistedHeaders: ["Authorization"],
-      },
-      description: `${pattern} agent runtime for ${config.stack_name_base}`,
+      }),
     })
 
-    // AGUI protocol override — CloudFormation doesn't support AGUI enum yet
-    // (only MCP | HTTP | A2A). Runtime deploys as HTTP, which also works properly.
-    // if (pattern.startsWith("agui-")) {
-    //   const cfnRuntime = this.agentRuntime.node.defaultChild as cdk.CfnResource
-    //   cfnRuntime.addPropertyOverride("ProtocolConfiguration", "AGUI")
-    // }
+    // ── Lambda: sensor-data-processor ────────────────────────────────────────
+    // Triggered by Kinesis stream (batch 10) — writes each record to DynamoDB
+    const processorFn = new lambda.Function(this, "SensorDataProcessor", {
+      functionName: "sensor-data-processor",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "..", "lambdas", "sensor-data-processor") // nosemgrep
+      ),
+      role: lambdaRole,
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        DYNAMODB_TABLE_NAME: readingsTable.tableName,
+      },
+      logGroup: new logs.LogGroup(this, "ProcessorLogGroup", {
+        logGroupName: "/aws/lambda/sensor-data-processor",
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
 
-    // Make sure that ZIP is uploaded before Runtime is created
-    if (zipPackagerResource) {
-      this.agentRuntime.node.addDependency(zipPackagerResource)
-    }
+    // Wire Kinesis → processor Lambda
+    processorFn.addEventSource(
+      new lambda_events.KinesisEventSource(sensorStream, {
+        batchSize: 10,
+        startingPosition: lambda.StartingPosition.LATEST,
+      })
+    )
 
-    // Store the runtime ARN
-    this.runtimeArn = this.agentRuntime.agentRuntimeArn
+    // ── Lambda: sensor-readings-fetcher ──────────────────────────────────────
+    // Triggered by GET /readings — queries DynamoDB for latest N readings per machine
+    const fetcherFn = new lambda.Function(this, "SensorReadingsFetcher", {
+      functionName: "sensor-readings-fetcher",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "..", "lambdas", "sensor-readings-fetcher") // nosemgrep
+      ),
+      role: lambdaRole,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        DYNAMODB_TABLE_NAME: readingsTable.tableName,
+      },
+      logGroup: new logs.LogGroup(this, "FetcherLogGroup", {
+        logGroupName: "/aws/lambda/sensor-readings-fetcher",
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // ── Lambda: sensor-chat-handler ───────────────────────────────────────────
+    // Triggered by POST /chat — routes to Bedrock Agent 1 (data) or Agent 2 (KB)
+    // Set DATA_AGENT_ID, DATA_AGENT_ALIAS_ID, KB_AGENT_ID, KB_AGENT_ALIAS_ID
+    // after creating the agents manually in the AWS console (see README).
+    const chatFn = new lambda.Function(this, "SensorChatHandler", {
+      functionName: "sensor-chat-handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "..", "lambdas", "sensor-chat-handler") // nosemgrep
+      ),
+      role: lambdaRole,
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        // Populate these after manually creating the Bedrock agents in the console
+        DATA_AGENT_ID: "PLACEHOLDER",
+        DATA_AGENT_ALIAS_ID: "PLACEHOLDER",
+        KB_AGENT_ID: "PLACEHOLDER",
+        KB_AGENT_ALIAS_ID: "PLACEHOLDER",
+        AWS_BEDROCK_REGION: this.region,
+      },
+      logGroup: new logs.LogGroup(this, "ChatLogGroup", {
+        logGroupName: "/aws/lambda/sensor-chat-handler",
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // ── Lambda: sensor-report-handler ─────────────────────────────────────────
+    // Triggered by POST /report — fetches 50 readings then calls Bedrock InvokeModel
+    const reportFn = new lambda.Function(this, "SensorReportHandler", {
+      functionName: "sensor-report-handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "..", "lambdas", "sensor-report-handler") // nosemgrep
+      ),
+      role: lambdaRole,
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        DYNAMODB_TABLE_NAME: readingsTable.tableName,
+        BEDROCK_REGION: "us-east-1",
+      },
+      logGroup: new logs.LogGroup(this, "ReportLogGroup", {
+        logGroupName: "/aws/lambda/sensor-report-handler",
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // ── REST API Gateway (open, no auth — Cognito auth is frontend-only for POC) ──
+    const api = new apigateway.RestApi(this, "FactoryApi", {
+      restApiName: "factory-sensor-api",
+      description: "Factory sensor monitoring API — POC (no gateway auth)",
+      defaultCorsPreflightOptions: {
+        // Allow all origins for POC; tighten in production
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: ["GET", "POST", "OPTIONS"],
+        allowHeaders: ["Content-Type", "Authorization"],
+      },
+      deployOptions: {
+        stageName: "prod",
+        loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+        metricsEnabled: true,
+      },
+    })
+
+    // POST /generate
+    const generateResource = api.root.addResource("generate")
+    generateResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(generatorFn),
+      { authorizationType: apigateway.AuthorizationType.NONE }
+    )
+
+    // GET /readings?machine_id=X&limit=N
+    const readingsResource = api.root.addResource("readings")
+    readingsResource.addMethod(
+      "GET",
+      new apigateway.LambdaIntegration(fetcherFn),
+      { authorizationType: apigateway.AuthorizationType.NONE }
+    )
+
+    // POST /chat
+    const chatResource = api.root.addResource("chat")
+    chatResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(chatFn),
+      { authorizationType: apigateway.AuthorizationType.NONE }
+    )
+
+    // POST /report
+    const reportResource = api.root.addResource("report")
+    reportResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(reportFn),
+      { authorizationType: apigateway.AuthorizationType.NONE }
+    )
+
+    this.factoryApiUrl = api.url
+
+    // Store API URL in SSM for easy retrieval
+    new ssm.StringParameter(this, "FactoryApiUrlParam", {
+      parameterName: `/${config.stack_name_base}/factory-api-url`,
+      stringValue: api.url,
+      description: "Factory sensor monitoring API URL",
+    })
+
+    // Store bucket name for post-deploy upload step
+    new ssm.StringParameter(this, "KbBucketNameParam", {
+      parameterName: `/${config.stack_name_base}/kb-bucket-name`,
+      stringValue: kbBucket.bucketName,
+      description: "S3 bucket name for Bedrock Knowledge Base documents",
+    })
 
     // Outputs
-    new cdk.CfnOutput(this, "AgentRuntimeId", {
-      description: "ID of the created agent runtime",
-      value: this.agentRuntime.agentRuntimeId,
+    new cdk.CfnOutput(this, "FactoryApiUrl", {
+      value: api.url,
+      description: "Factory sensor monitoring REST API URL",
     })
 
-    new cdk.CfnOutput(this, "AgentRuntimeArn", {
-      description: "ARN of the created agent runtime",
-      value: this.agentRuntime.agentRuntimeArn,
-      exportName: `${config.stack_name_base}-AgentRuntimeArn`,
+    new cdk.CfnOutput(this, "SensorRawBucketName", {
+      value: rawBucket.bucketName,
+      description: "S3 bucket for raw sensor batches",
     })
 
-    new cdk.CfnOutput(this, "AgentRoleArn", {
-      description: "ARN of the agent execution role",
-      value: agentRole.roleArn,
+    new cdk.CfnOutput(this, "KnowledgebaseBucketName", {
+      value: kbBucket.bucketName,
+      description: "S3 bucket for KB documents — upload manuals here after deploy",
     })
 
-    // Memory ARN output
-    new cdk.CfnOutput(this, "MemoryArn", {
-      description: "ARN of the agent memory resource",
-      value: memoryArn,
+    new cdk.CfnOutput(this, "SensorStreamName", {
+      value: sensorStream.streamName,
+      description: "Kinesis stream for sensor records",
+    })
+
+    new cdk.CfnOutput(this, "ReadingsTableName", {
+      value: readingsTable.tableName,
+      description: "DynamoDB table for sensor readings",
+    })
+
+    new cdk.CfnOutput(this, "ChatHandlerNote", {
+      value: "Set DATA_AGENT_ID, DATA_AGENT_ALIAS_ID, KB_AGENT_ID, KB_AGENT_ALIAS_ID on sensor-chat-handler after creating agents",
+      description: "Post-deploy manual step for chat Lambda",
     })
   }
 
-  private createRuntimeSSMParameters(config: AppConfig): void {
-    // Store runtime ARN in SSM for frontend stack
-    new ssm.StringParameter(this, "RuntimeArnParam", {
-      parameterName: `/${config.stack_name_base}/runtime-arn`,
-      stringValue: this.runtimeArn,
-    })
-  }
+  // ── Cognito SSM parameters (simplified — M2M removed) ───────────────────────
 
   private createCognitoSSMParameters(config: AppConfig): void {
-    // Store Cognito configuration in SSM for testing and frontend access
     new ssm.StringParameter(this, "CognitoUserPoolIdParam", {
       parameterName: `/${config.stack_name_base}/cognito-user-pool-id`,
       stringValue: this.userPoolId,
@@ -446,21 +343,15 @@ export class BackendStack extends cdk.NestedStack {
       description: "Cognito User Pool Client ID",
     })
 
-    new ssm.StringParameter(this, "MachineClientIdParam", {
-      parameterName: `/${config.stack_name_base}/machine_client_id`,
-      stringValue: this.machineClient.userPoolClientId,
-      description: "Machine Client ID for M2M authentication",
-    })
-
-    // Use the correct Cognito domain format from the passed domain
     new ssm.StringParameter(this, "CognitoDomainParam", {
       parameterName: `/${config.stack_name_base}/cognito_provider`,
       stringValue: `${this.userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com`,
-      description: "Cognito domain URL for token endpoint",
+      description: "Cognito domain URL",
     })
   }
 
-  // Creates a DynamoDB table for storing user feedback.
+  // ── FAST baseline: Feedback table (kept unchanged) ───────────────────────────
+
   private createFeedbackTable(config: AppConfig): dynamodb.Table {
     const feedbackTable = new dynamodb.Table(this, "FeedbackTable", {
       tableName: `${config.stack_name_base}-feedback`,
@@ -476,7 +367,6 @@ export class BackendStack extends cdk.NestedStack {
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
     })
 
-    // Add GSI for querying by feedbackType with timestamp sorting
     feedbackTable.addGlobalSecondaryIndex({
       indexName: "feedbackType-timestamp-index",
       partitionKey: {
@@ -493,54 +383,33 @@ export class BackendStack extends cdk.NestedStack {
     return feedbackTable
   }
 
-  /**
-   * Creates an API Gateway with Lambda integration for the feedback endpoint.
-   * This is an EXAMPLE implementation demonstrating best practices for API Gateway + Lambda.
-   *
-   * API Contract - POST /feedback
-   * Authorization: Bearer <cognito-access-token> (required)
-   *
-   * Request Body:
-   *   sessionId: string (required, max 100 chars, alphanumeric with -_) - Conversation session ID
-   *   message: string (required, max 5000 chars) - Agent's response being rated
-   *   feedbackType: "positive" | "negative" (required) - User's rating
-   *   comment: string (optional, max 5000 chars) - User's explanation for rating
-   *
-   * Success Response (200):
-   *   { success: true, feedbackId: string }
-   *
-   * Error Responses:
-   *   400: { error: string } - Validation failure (missing fields, invalid format)
-   *   401: { error: "Unauthorized" } - Invalid/missing JWT token
-   *   500: { error: "Internal server error" } - DynamoDB or processing error
-   *
-   * Implementation: infra-cdk/lambdas/feedback/index.py
-   */
+  // ── FAST baseline: Feedback API (kept unchanged) ─────────────────────────────
+
   private createFeedbackApi(
     config: AppConfig,
     frontendUrl: string,
     feedbackTable: dynamodb.Table
   ): void {
-    // Create Lambda function for feedback using Python
-    // ARM_64 required — matches Powertools ARM64 layer and avoids cross-platform
-    const feedbackLambda = new PythonFunction(this, "FeedbackLambda", {
+    // Plain lambda.Function avoids the Docker-at-synth requirement of PythonFunction.
+    // All dependencies (aws_lambda_powertools, pydantic) are provided by the Powertools layer.
+    const feedbackLambda = new lambda.Function(this, "FeedbackLambda", {
       functionName: `${config.stack_name_base}-feedback`,
       runtime: lambda.Runtime.PYTHON_3_13,
       architecture: lambda.Architecture.ARM_64,
-      entry: path.join(__dirname, "..", "lambdas", "feedback"), // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      handler: "handler",
+      // handler: <module_name>.<function_name> — file is index.py, function is handler
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "..", "lambdas", "feedback")), // nosemgrep
       environment: {
         TABLE_NAME: feedbackTable.tableName,
         CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
       },
       timeout: cdk.Duration.seconds(30),
       layers: [
+        // Powertools v3 layer bundles aws-lambda-powertools AND pydantic v2 — no pip install needed
         lambda.LayerVersion.fromLayerVersionArn(
           this,
           "PowertoolsLayer",
-          `arn:aws:lambda:${
-            cdk.Stack.of(this).region
-          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
         ),
       ],
       logGroup: new logs.LogGroup(this, "FeedbackLambdaLogGroup", {
@@ -550,18 +419,11 @@ export class BackendStack extends cdk.NestedStack {
       }),
     })
 
-    // Grant Lambda permissions to write to DynamoDB
     feedbackTable.grantWriteData(feedbackLambda)
 
-    /*
-     * CORS TODO: Wildcard (*) used because Backend deploys before Frontend in nested stack order.
-     * For Lambda proxy integrations, the Lambda's ALLOWED_ORIGINS env var is the primary CORS control.
-     * API Gateway defaultCorsPreflightOptions below only handles OPTIONS preflight requests.
-     * See detailed explanation and fix options in: infra-cdk/lambdas/feedback/index.py
-     */
     const api = new apigateway.RestApi(this, "FeedbackApi", {
       restApiName: `${config.stack_name_base}-api`,
-      description: "API for user feedback and future endpoints",
+      description: "API for user feedback",
       defaultCorsPreflightOptions: {
         allowOrigins: [frontendUrl, "http://localhost:3000"],
         allowMethods: ["POST", "OPTIONS"],
@@ -571,476 +433,29 @@ export class BackendStack extends cdk.NestedStack {
         stageName: "prod",
         throttlingRateLimit: 100,
         throttlingBurstLimit: 200,
-        cachingEnabled: true,
-        cacheDataEncrypted: true,
-        cacheClusterEnabled: true,
-        cacheClusterSize: "0.5",
-        cacheTtl: cdk.Duration.minutes(5),
         loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
         metricsEnabled: true,
-        accessLogDestination: new apigateway.LogGroupLogDestination(
-          new logs.LogGroup(this, "FeedbackApiAccessLogGroup", {
-            logGroupName: `/aws/apigateway/${config.stack_name_base}-api-access`,
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          })
-        ),
-        accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields(),
-        tracingEnabled: true,
       },
     })
 
-    // Add request validator for API security
-    const requestValidator = new apigateway.RequestValidator(this, "FeedbackApiRequestValidator", {
-      restApi: api,
-      requestValidatorName: `${config.stack_name_base}-request-validator`,
-      validateRequestBody: true,
-      validateRequestParameters: true,
-    })
-
-    // Create Cognito authorizer
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "FeedbackApiAuthorizer", {
       cognitoUserPools: [this.userPool],
       identitySource: "method.request.header.Authorization",
       authorizerName: `${config.stack_name_base}-authorizer`,
     })
 
-    // Create /feedback resource and POST method
     const feedbackResource = api.root.addResource("feedback")
     feedbackResource.addMethod("POST", new apigateway.LambdaIntegration(feedbackLambda), {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
-      requestValidator: requestValidator,
     })
 
-    // Store the API URL for access from main stack
     this.feedbackApiUrl = api.url
 
-    // Store API URL in SSM for frontend
     new ssm.StringParameter(this, "FeedbackApiUrlParam", {
       parameterName: `/${config.stack_name_base}/feedback-api-url`,
       stringValue: api.url,
       description: "Feedback API Gateway URL",
     })
-  }
-
-  private createAgentCoreGateway(config: AppConfig): void {
-    // Create sample tool Lambda
-    const toolLambda = new lambda.Function(this, "SampleToolLambda", {
-      runtime: lambda.Runtime.PYTHON_3_13,
-      handler: "sample_tool_lambda.handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "../../gateway/tools/sample_tool")), // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, "SampleToolLambdaLogGroup", {
-        logGroupName: `/aws/lambda/${config.stack_name_base}-sample-tool`,
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    })
-
-    // Create comprehensive IAM role for gateway
-    const gatewayRole = new iam.Role(this, "GatewayRole", {
-      assumedBy: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
-      description: "Role for AgentCore Gateway with comprehensive permissions",
-    })
-
-    // Lambda invoke permission
-    toolLambda.grantInvoke(gatewayRole)
-
-    // Bedrock permissions (region-agnostic)
-    gatewayRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources: [
-          "arn:aws:bedrock:*::foundation-model/*",
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      })
-    )
-
-    // SSM parameter access
-    gatewayRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["ssm:GetParameter", "ssm:GetParameters"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/${config.stack_name_base}/*`,
-        ],
-      })
-    )
-
-    // Cognito permissions
-    gatewayRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["cognito-idp:DescribeUserPoolClient", "cognito-idp:InitiateAuth"],
-        resources: [this.userPool.userPoolArn],
-      })
-    )
-
-    // CloudWatch Logs
-    gatewayRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-        resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
-        ],
-      })
-    )
-
-    // Load tool specification from JSON file
-    const toolSpecPath = path.join(__dirname, "../../gateway/tools/sample_tool/tool_spec.json") // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-    const apiSpec = JSON.parse(require("fs").readFileSync(toolSpecPath, "utf8"))
-
-    // Cognito OAuth2 configuration for gateway
-    const cognitoIssuer = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}`
-    const cognitoDiscoveryUrl = `${cognitoIssuer}/.well-known/openid-configuration`
-
-    // Create OAuth2 Credential Provider for AgentCore Runtime to authenticate with AgentCore Gateway
-    // Uses cr.Provider pattern with explicit Lambda to avoid logging secrets in CloudWatch
-    const providerName = `${config.stack_name_base}-runtime-gateway-auth`
-
-    // Lambda to create/delete OAuth2 provider
-    const oauth2ProviderLambda = new lambda.Function(this, "OAuth2ProviderLambda", {
-      runtime: lambda.Runtime.PYTHON_3_13,
-      handler: "index.handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "..", "lambdas", "oauth2-provider")), // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      timeout: cdk.Duration.minutes(5),
-      logGroup: new logs.LogGroup(this, "OAuth2ProviderLambdaLogGroup", {
-        logGroupName: `/aws/lambda/${config.stack_name_base}-oauth2-provider`,
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    })
-
-    // Grant Lambda permissions to read machine client secret
-    this.machineClientSecret.grantRead(oauth2ProviderLambda)
-
-    // Grant Lambda permissions for Bedrock AgentCore operations
-    // OAuth2 Credential Provider operations - scoped to all providers in default Token Vault
-    // Note: Need both vault-level and nested resource permissions because:
-    // - CreateOauth2CredentialProvider checks permission on vault itself (token-vault/default)
-    // - Also checks permission on the nested resource path (token-vault/default/oauth2credentialprovider/*)
-    oauth2ProviderLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "bedrock-agentcore:CreateOauth2CredentialProvider",
-          "bedrock-agentcore:DeleteOauth2CredentialProvider",
-          "bedrock-agentcore:GetOauth2CredentialProvider",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/*`,
-        ],
-      })
-    )
-
-    // Token Vault operations - scoped to default vault
-    // Note: Need both exact match (default) and wildcard (default/*) because:
-    // - AWS checks permission on the vault container itself (token-vault/default)
-    // - AWS also checks permission on resources inside (token-vault/default/*)
-    oauth2ProviderLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "bedrock-agentcore:CreateTokenVault",
-          "bedrock-agentcore:GetTokenVault",
-          "bedrock-agentcore:DeleteTokenVault",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/*`,
-        ],
-      })
-    )
-
-    // Grant Lambda permissions for Token Vault secret management
-    // Scoped to OAuth2 secrets in AgentCore Identity default namespace
-    oauth2ProviderLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "secretsmanager:CreateSecret",
-          "secretsmanager:DeleteSecret",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:PutSecretValue",
-        ],
-        resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!default/oauth2/*`,
-        ],
-      })
-    )
-
-    // Create Custom Resource Provider
-    const oauth2Provider = new cr.Provider(this, "OAuth2ProviderProvider", {
-      onEventHandler: oauth2ProviderLambda,
-    })
-
-    // Create Custom Resource
-    const runtimeCredentialProvider = new cdk.CustomResource(this, "RuntimeCredentialProvider", {
-      serviceToken: oauth2Provider.serviceToken,
-      properties: {
-        ProviderName: providerName,
-        ClientSecretArn: this.machineClientSecret.secretArn,
-        DiscoveryUrl: cognitoDiscoveryUrl,
-        ClientId: this.machineClient.userPoolClientId,
-      },
-    })
-
-    // Store for use in createAgentCoreRuntime()
-    this.runtimeCredentialProvider = runtimeCredentialProvider
-
-    // Create Gateway using L1 construct (CfnGateway)
-    // This replaces the Custom Resource approach with native CloudFormation support
-    const gateway = new bedrockagentcore.CfnGateway(this, "AgentCoreGateway", {
-      name: `${config.stack_name_base}-gateway`,
-      roleArn: gatewayRole.roleArn,
-      protocolType: "MCP",
-      protocolConfiguration: {
-        mcp: {
-          supportedVersions: ["2025-03-26"],
-          // Optional: Enable semantic search for tools
-          // searchType: "SEMANTIC",
-        },
-      },
-      authorizerType: "CUSTOM_JWT",
-      authorizerConfiguration: {
-        customJwtAuthorizer: {
-          allowedClients: [this.machineClient.userPoolClientId],
-          discoveryUrl: cognitoDiscoveryUrl,
-        },
-      },
-      description: "AgentCore Gateway with MCP protocol and JWT authentication",
-    })
-
-    // Create Gateway Target using L1 construct (CfnGatewayTarget)
-    const gatewayTarget = new bedrockagentcore.CfnGatewayTarget(this, "GatewayTarget", {
-      gatewayIdentifier: gateway.attrGatewayIdentifier,
-      name: "sample-tool-target",
-      description: "Sample tool Lambda target",
-      targetConfiguration: {
-        mcp: {
-          lambda: {
-            lambdaArn: toolLambda.functionArn,
-            toolSchema: {
-              inlinePayload: apiSpec,
-            },
-          },
-        },
-      },
-      credentialProviderConfigurations: [
-        {
-          credentialProviderType: "GATEWAY_IAM_ROLE",
-        },
-      ],
-    })
-
-    // Ensure proper creation order
-    gatewayTarget.addDependency(gateway)
-    gateway.node.addDependency(toolLambda)
-    gateway.node.addDependency(this.machineClient)
-    gateway.node.addDependency(gatewayRole)
-
-    // Store AgentCore Gateway URL in SSM for AgentCore Runtime access
-    new ssm.StringParameter(this, "GatewayUrlParam", {
-      parameterName: `/${config.stack_name_base}/gateway_url`,
-      stringValue: gateway.attrGatewayUrl,
-      description: "AgentCore Gateway URL",
-    })
-
-    // Output gateway information
-    new cdk.CfnOutput(this, "GatewayId", {
-      value: gateway.attrGatewayIdentifier,
-      description: "AgentCore Gateway ID",
-    })
-
-    new cdk.CfnOutput(this, "GatewayUrl", {
-      value: gateway.attrGatewayUrl,
-      description: "AgentCore Gateway URL",
-    })
-
-    new cdk.CfnOutput(this, "GatewayArn", {
-      value: gateway.attrGatewayArn,
-      description: "AgentCore Gateway ARN",
-    })
-
-    new cdk.CfnOutput(this, "GatewayTargetId", {
-      value: gatewayTarget.ref,
-      description: "AgentCore Gateway Target ID",
-    })
-
-    new cdk.CfnOutput(this, "ToolLambdaArn", {
-      description: "ARN of the sample tool Lambda",
-      value: toolLambda.functionArn,
-    })
-  }
-
-  private createMachineAuthentication(config: AppConfig): void {
-    // Create Resource Server for Machine-to-Machine (M2M) authentication
-    // This defines the API scopes that machine clients can request access to
-    const resourceServer = new cognito.UserPoolResourceServer(this, "ResourceServer", {
-      userPool: this.userPool,
-      identifier: `${config.stack_name_base}-gateway`,
-      userPoolResourceServerName: `${config.stack_name_base}-gateway-resource-server`,
-      scopes: [
-        new cognito.ResourceServerScope({
-          scopeName: "read",
-          scopeDescription: "Read access to gateway",
-        }),
-        new cognito.ResourceServerScope({
-          scopeName: "write",
-          scopeDescription: "Write access to gateway",
-        }),
-      ],
-    })
-
-    // Create Machine Client for AgentCore Gateway authentication
-    //
-    // WHAT IS A MACHINE CLIENT?
-    // A machine client is a Cognito User Pool Client configured for server-to-server authentication
-    // using the OAuth2 Client Credentials flow. Unlike user-facing clients, it doesn't require
-    // human interaction or user credentials.
-    //
-    // HOW IS IT DIFFERENT FROM THE REGULAR USER POOL CLIENT?
-    // - Regular client: Uses Authorization Code flow for human users (frontend login)
-    // - Machine client: Uses Client Credentials flow for service-to-service authentication
-    // - Regular client: No client secret (public client for frontend security)
-    // - Machine client: Has client secret (confidential client for backend security)
-    // - Regular client: Scopes are openid, email, profile (user identity)
-    // - Machine client: Scopes are custom resource server scopes (API permissions)
-    //
-    // WHY IS IT NEEDED?
-    // The AgentCore Gateway needs to authenticate with Cognito to validate tokens and make
-    // API calls on behalf of the system. The machine client provides the credentials for
-    // this service-to-service authentication without requiring user interaction.
-    this.machineClient = new cognito.UserPoolClient(this, "MachineClient", {
-      userPool: this.userPool,
-      userPoolClientName: `${config.stack_name_base}-machine-client`,
-      generateSecret: true, // Required for client credentials flow
-      oAuth: {
-        flows: {
-          clientCredentials: true, // Enable OAuth2 Client Credentials flow
-        },
-        scopes: [
-          // Grant access to the resource server scopes defined above
-          cognito.OAuthScope.resourceServer(
-            resourceServer,
-            new cognito.ResourceServerScope({
-              scopeName: "read",
-              scopeDescription: "Read access to gateway",
-            })
-          ),
-          cognito.OAuthScope.resourceServer(
-            resourceServer,
-            new cognito.ResourceServerScope({
-              scopeName: "write",
-              scopeDescription: "Write access to gateway",
-            })
-          ),
-        ],
-      },
-    })
-
-    // Machine client must be created after resource server
-    this.machineClient.node.addDependency(resourceServer)
-
-    // Store machine client secret in Secrets Manager for testing and external access.
-    // This secret is used by test scripts and potentially other external tools.
-    this.machineClientSecret = new secretsmanager.Secret(this, "MachineClientSecret", {
-      secretName: `/${config.stack_name_base}/machine_client_secret`,
-      secretStringValue: cdk.SecretValue.unsafePlainText(
-        this.machineClient.userPoolClientSecret.unsafeUnwrap()
-      ),
-      description: "Machine Client Secret for M2M authentication",
-    })
-  }
-
-  /**
-   * Builds the RuntimeNetworkConfiguration based on the config.yaml settings.
-   * When network_mode is "VPC", imports the user's existing VPC, subnets, and
-   * optionally security groups, then returns a VPC-based network configuration.
-   * When network_mode is "PUBLIC" (default), returns a public network configuration.
-   *
-   * @param config - The application configuration from config.yaml.
-   * @returns A RuntimeNetworkConfiguration for the AgentCore Runtime.
-   */
-  private buildNetworkConfiguration(config: AppConfig): agentcore.RuntimeNetworkConfiguration {
-    if (config.backend.network_mode === "VPC") {
-      const vpcConfig = config.backend.vpc
-      // vpc config is validated in ConfigManager, but guard here for type safety
-      if (!vpcConfig) {
-        throw new Error("backend.vpc configuration is required when network_mode is 'VPC'.")
-      }
-
-      // Import the user's existing VPC by ID.
-      // This performs a context lookup at synth time to resolve VPC attributes.
-      const vpc = ec2.Vpc.fromLookup(this, "ImportedVpc", {
-        vpcId: vpcConfig.vpc_id,
-      })
-
-      // Import the user-specified subnets by their IDs.
-      // These subnets must exist within the VPC specified above.
-      const subnets: ec2.ISubnet[] = vpcConfig.subnet_ids.map((subnetId: string, index: number) =>
-        ec2.Subnet.fromSubnetId(this, `ImportedSubnet${index}`, subnetId)
-      )
-
-      // Build the VPC config props for the AgentCore L2 construct.
-      // Security groups are optional — if not provided, the construct creates a default one.
-      const securityGroups =
-        vpcConfig.security_group_ids && vpcConfig.security_group_ids.length > 0
-          ? vpcConfig.security_group_ids.map((sgId: string, index: number) =>
-              ec2.SecurityGroup.fromSecurityGroupId(this, `ImportedSG${index}`, sgId)
-            )
-          : undefined
-
-      const vpcConfigProps: agentcore.VpcConfigProps = {
-        vpc: vpc,
-        vpcSubnets: {
-          subnets: subnets,
-        },
-        securityGroups: securityGroups,
-      }
-
-      return agentcore.RuntimeNetworkConfiguration.usingVpc(this, vpcConfigProps)
-    }
-
-    // Default: public network mode
-    return agentcore.RuntimeNetworkConfiguration.usingPublicNetwork()
-  }
-
-  /**
-   * Recursively read directory contents and encode as base64.
-   *
-   * @param dirPath - Directory to read.
-   * @param prefix - Prefix for file paths in output.
-   * @param output - Output object to populate.
-   */
-  private readDirRecursive(dirPath: string, prefix: string, output: Record<string, string>): void {
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      const fullPath = path.join(dirPath, entry.name) // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      const relativePath = path.join(prefix, entry.name) // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-
-      if (entry.isDirectory()) {
-        // Skip __pycache__ directories
-        if (entry.name !== "__pycache__") {
-          this.readDirRecursive(fullPath, relativePath, output)
-        }
-      } else if (entry.isFile()) {
-        const content = fs.readFileSync(fullPath)
-        output[relativePath] = content.toString("base64")
-      }
-    }
-  }
-
-  /**
-   * Create a hash of content for change detection.
-   *
-   * @param content - Content to hash.
-   * @returns Hash string.
-   */
-  private hashContent(content: string): string {
-    const crypto = require("crypto")
-    return crypto.createHash("sha256").update(content).digest("hex").slice(0, 16)
   }
 }

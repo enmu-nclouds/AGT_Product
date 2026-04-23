@@ -1,0 +1,139 @@
+GENERAL FACTORY SAFETY PROCEDURES — ACME MANUFACTURING PLANT, UNIT B
+Document: SOP-SAFETY-001  |  Rev: 5  |  Authorised by: Site HSE Manager  |  Date: 2024-01
+
+=============================================================================
+1. PERSONAL PROTECTIVE EQUIPMENT (PPE) REQUIREMENTS
+=============================================================================
+All personnel entering Unit B must comply with the following minimum PPE:
+
+Zone A — General floor access:
+  - Hard hat (EN 397)
+  - Safety boots (steel toe-cap, EN ISO 20345 S3)
+  - High-visibility vest (Class 2)
+  - Safety glasses (EN 166)
+
+Zone B — Rotating machinery area (includes Pump-01, Compressor-01, Motor-01):
+  - All Zone A PPE, PLUS:
+  - Hearing protection (min 25 dB SNR) when any machine is running
+  - Gloves (cut level C minimum) when handling mechanical components
+
+Zone C — Conveyor and materials handling area (Conveyor-01):
+  - All Zone A PPE, PLUS:
+  - No loose clothing, ties, or jewellery
+  - Long sleeves are mandatory
+  - Gloves prohibited when approaching moving conveyor belt (entanglement risk)
+
+Zone D — High-pressure systems (Turbine-01, Compressor-01 pressure side):
+  - All Zone A PPE, PLUS:
+  - Face shield (full-face, EN 166) when breaking any pressurised joints
+  - Chemical-resistant gloves when handling hydraulic oil or heat transfer fluid
+
+=============================================================================
+2. EMERGENCY SHUTDOWN SEQUENCE (SITE-WIDE)
+=============================================================================
+In the event of fire, major leak, electrical fault, or injury:
+
+  STEP 1 — Alert: Sound the site alarm (pull red handle at any fire point or
+           press ESTOP on the main control panel in the control room).
+
+  STEP 2 — Evacuate: All non-essential personnel evacuate via marked green
+           exit routes to Assembly Point A (north car park, Gate 3).
+
+  STEP 3 — Isolate: The Control Room Operator (CRO) executes the following
+           in order:
+             a) ESTOP all running machinery via the DCS Safety Shutdown panel.
+             b) Close the main gas isolation valve (red handle, gas room).
+             c) Activate the firewater deluge system if fire is confirmed.
+             d) Trip the 11 kV incomer if electrical fault is involved.
+
+  STEP 4 — Report: CRO calls the Emergency Services (dial 999 from landline)
+           and the Site Emergency Coordinator (SEC) simultaneously.
+
+  STEP 5 — Do not re-enter the building until the all-clear is given by the
+           SEC or emergency services.
+
+=============================================================================
+3. ESCALATION CONTACTS
+=============================================================================
+Use these contacts in the order listed. Do not skip levels except in emergencies.
+
+  Shift Supervisor:          Tom Hargreaves     Ext. 2201 / Mobile: 07700-900101
+  Maintenance Lead:          Sandra Okafor      Ext. 2315 / Mobile: 07700-900202
+  Site HSE Manager:          David Kellner      Ext. 2100 / Mobile: 07700-900303
+  Site Emergency Coord.:     Helen Bryce        Ext. 2001 / Mobile: 07700-900404
+  Plant Manager:             Richard Adeyemi    Ext. 2010 / Mobile: 07700-900505
+  External Maintenance Cont: AcmeTech Services  Tel: 01632-960111 (24/7 helpdesk)
+  Emergency Services:        999 (UK) or 112
+
+=============================================================================
+4. INCIDENT REPORTING PROCEDURE
+=============================================================================
+All incidents — including near-misses — MUST be reported. Failure to report
+is a disciplinary offence.
+
+  IMMEDIATE (within 15 minutes of incident):
+    - Notify the Shift Supervisor verbally.
+    - If injury: call First Aider (Ext. 2400) and, if serious, dial 999.
+    - Preserve the scene — do not move equipment or materials until authorised
+      by HSE Manager unless doing so is necessary to prevent further injury.
+
+  SHORT-TERM (within 1 hour):
+    - Complete an Initial Incident Notification form (paper copies at each
+      station board; electronic form at https://intranet.acme.local/hse).
+    - Photograph the scene from at least four angles before any clean-up.
+
+  FULL REPORT (within 24 hours):
+    - Complete the full Incident Investigation Report (IIR) in the HSE system.
+    - Include: root cause, contributing factors, immediate corrective actions,
+      and recommendations to prevent recurrence.
+    - Reportable injuries (RIDDOR) are notified to the HSE by the HSE Manager.
+
+=============================================================================
+5. LOCKOUT / TAGOUT (LOTO) — SOP-LOTO-002 SUMMARY
+=============================================================================
+LOTO must be applied before any maintenance work on machinery. No exceptions.
+
+  Step 1 — Notify: Inform the Shift Supervisor that the equipment will be
+           isolated. Record it in the Permit to Work (PTW) log.
+
+  Step 2 — Identify all energy sources: electrical (main isolator, VFD,
+           controls), pneumatic (instrument air supply), hydraulic
+           (accumulator), gravity (suspended loads), thermal (hot surfaces).
+
+  Step 3 — Isolate: Switch off and physically lock the main isolator with a
+           personal padlock. Each worker applies their own lock. All locks must
+           be on before work starts.
+
+  Step 4 — Tag: Attach a red DANGER tag to each isolator with the worker's
+           name, date, and contact number.
+
+  Step 5 — Verify zero energy:
+             - Electrical: test with approved voltage tester (CAT III min).
+             - Pneumatic: open downstream bleed valve; confirm zero pressure.
+             - Stored energy: discharge any capacitors; block suspended loads.
+
+  Step 6 — Work safely. Do not remove another person's lock under any
+           circumstances. If a key is lost, the HSE Manager must authorise
+           removal using the master key procedure.
+
+  Step 7 — Restore: Remove all tools and materials. Replace all guards.
+           Each worker removes their own lock in reverse order. Confirm with
+           Shift Supervisor before re-energising. Update the PTW log.
+
+=============================================================================
+6. PERMIT TO WORK (PTW) SYSTEM
+=============================================================================
+A PTW is mandatory for:
+  - Any maintenance inside a machine guard or enclosure
+  - Hot work (welding, grinding, cutting) anywhere on site
+  - Working at height (> 2 m above floor level)
+  - Confined space entry
+  - Any work that requires breaking a pressurised or hazardous system
+
+PTW forms are issued by the Shift Supervisor and must be signed by:
+  - Issuing authority (Shift Supervisor or Plant Manager)
+  - Person(s) performing the work
+  - Safety observer (if required by risk assessment)
+
+PTW expires at the end of the shift. A new PTW must be issued for each shift.
+All completed PTWs are retained for 3 years in the HSE archive.

@@ -1,0 +1,117 @@
+MACHINE MANUAL — PUMP-01 (Centrifugal Process Pump)
+Version: 3.2  |  Site: Acme Manufacturing Plant, Unit B  |  Date: 2024-01
+
+=============================================================================
+1. MACHINE OVERVIEW
+=============================================================================
+Pump-01 is a horizontal-split-case centrifugal pump used to circulate cooling
+water through the primary heat-exchanger loop. Rated flow: 450 L/min at
+6.5 bar discharge pressure. Motor coupling: direct-drive, 37 kW, 1480 RPM
+rated speed.
+
+=============================================================================
+2. NORMAL OPERATING RANGES
+=============================================================================
+  Temperature (bearing housing):  60–90°C
+  Vibration (radial, RMS):        0.5–2.5 mm/s
+  Discharge pressure:             5.5–6.5 bar
+  Suction pressure:               1.8–2.5 bar
+  RPM:                            1400–1520
+  Motor current draw:             58–65 A
+
+Warning thresholds:
+  Temperature > 105°C — reduce load, check coolant flow
+  Vibration > 3.5 mm/s — inspect mechanical seal and impeller balance
+  Discharge pressure < 4.5 bar — check for cavitation or blocked suction strainer
+
+Critical (shut down immediately):
+  Temperature > 130°C
+  Vibration > 6.0 mm/s
+  Any sudden RPM drop > 200 RPM below setpoint
+
+=============================================================================
+3. MAINTENANCE SCHEDULE
+=============================================================================
+Weekly:
+  - Visual inspection for leaks at mechanical seal and flange joints
+  - Record bearing temperature and vibration (log in maintenance book)
+  - Verify suction strainer differential pressure < 0.3 bar
+
+Monthly:
+  - Grease bearing housing (2 shots, Mobilgrease XHP 222 or equivalent)
+  - Check coupling alignment with dial indicator (max 0.05 mm angular)
+  - Verify motor current draw under normal load
+  - Flush drain plugs and re-seat
+
+Annual:
+  - Full strip-down and inspection of impeller, wear rings, and shaft sleeve
+  - Replace mechanical seal assembly (P/N: GS-3142-SS)
+  - Replace coupling insert (P/N: JAW-HRC-90-PU)
+  - Hydrostatic pressure test at 1.5× design pressure
+  - Motor winding insulation resistance test (min 100 MΩ at 500 V DC)
+
+=============================================================================
+4. TROUBLESHOOTING
+=============================================================================
+
+4.1 Overheating (Temperature > 105°C)
+  Likely causes:
+    a) Low coolant flow — check suction valve position and strainer blockage
+    b) Cavitation — listen for rattling noise; increase suction pressure
+    c) Bearing failure — check vibration; replace bearings if > 3.5 mm/s
+    d) Shaft misalignment — re-align coupling
+  Steps:
+    1. Reduce pump speed by 10% via VFD and monitor temperature trend.
+    2. Inspect suction strainer; clean if dP > 0.3 bar.
+    3. If temp doesn't drop within 10 min, initiate controlled shutdown (§6).
+    4. Replace bearings (P/N: SKF-6315-2RS) if noise or vibration is elevated.
+
+4.2 High Vibration (> 3.5 mm/s)
+  Likely causes:
+    a) Cavitation — low suction pressure or air ingestion
+    b) Impeller wear or damage
+    c) Misalignment or loose coupling
+    d) Resonance with support structure
+  Steps:
+    1. Check suction pressure; increase if below 1.8 bar.
+    2. Reduce flow to 80% and observe if vibration decreases.
+    3. Shut down and inspect impeller for erosion or debris.
+    4. Re-check coupling alignment with dial indicator.
+
+4.3 Low Discharge Pressure (< 4.5 bar)
+  Likely causes:
+    a) Worn wear rings (radial clearance > 0.5 mm)
+    b) Partially closed discharge valve
+    c) Air locked casing
+  Steps:
+    1. Confirm all valves are fully open.
+    2. Vent the casing via the air vent valve on top of the casing.
+    3. If pressure remains low, shut down and replace wear rings
+       (P/N: WR-316SS-85mm).
+
+=============================================================================
+5. SPARE PARTS LIST
+=============================================================================
+  P/N GS-3142-SS     Mechanical seal assembly (John Crane Type 1B)
+  P/N SKF-6315-2RS   Radial bearing, both ends
+  P/N WR-316SS-85mm  Wear ring set (impeller + casing)
+  P/N JAW-HRC-90-PU  Coupling insert (polyurethane spider)
+  P/N VSS-40-NBR     Shaft sleeve O-ring kit
+  P/N STS-304-M12    Suction strainer element (40 mesh)
+
+=============================================================================
+6. SHUTDOWN PROCEDURE
+=============================================================================
+Controlled shutdown:
+  1. Reduce VFD setpoint to 50% speed and hold for 2 minutes.
+  2. Close discharge isolation valve slowly (over ~30 seconds).
+  3. Stop motor via VFD stop command.
+  4. Close suction isolation valve.
+  5. Allow pump to cool to < 60°C before opening any flanges.
+  6. Lock out / tag out (LOTO) per site procedure SOP-LOTO-002.
+
+Emergency stop:
+  1. Press red ESTOP button at local panel or in control room.
+  2. Close suction and discharge valves manually if safe to do so.
+  3. Report to shift supervisor immediately.
+  4. Do not restart without maintenance sign-off.

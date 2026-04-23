@@ -1,186 +1,173 @@
-# Fullstack AgentCore Solution Template (FAST)
+# Factory Sensor Monitoring POC
 
-_Author's note: for the official name for this solution is the "Fullstack Solution Template for Agentcore" but it is referred to throughout this code base as FAST for convenience._
+A full-stack factory equipment telemetry application built on AWS. The frontend is a React dashboard for real-time sensor monitoring, AI-powered chat, and automated performance reports. The backend is serverless: API Gateway → Lambda → DynamoDB, with Bedrock for AI features.
 
-The Fullstack AgentCore Solution Template (FAST) is a starter project repository that enables users (delivery scientists and engineers) to quickly deploy a secured, web-accessible React frontend connected to an AgentCore backend. Its purpose is to accelerate building full stack applications on AgentCore from weeks to days by handling the undifferentiated heavy lifting of infrastructure setup and to enable vibe-coding style development on top. The only central dependency of FAST is AgentCore. It is agnostic to agent SDK (Strands, LangGraph, etc) and to coding assistant platforms (Q, Kiro, Cline, Claude Code, etc).
+## Architecture
 
-FAST is designed with security and vibe-codability as primary tenets. Best practices and knowledge from experts are codified in _documentation_ in this repository rather than in _code_. By including this documentation in an AI coding assistant's context, or by instructing the AI coding assistant to leverage best practices and code snippets found in the documentation, delivery scientists and developers can quickly vibe-build AgentCore applications for any use case. AI coding assistants can be used to fully customize the frontend and the infrastructure, enabling scientists to focus the areas where their knowledge is most impactful: the actual prompt engineering and GenAI implementation details.
+### Frontend
+- **React + Vite + Tailwind + shadcn/ui** hosted on AWS Amplify
+- Machine selector (Pump-01, Compressor-01, Motor-01, Conveyor-01, Turbine-01)
+- Live readings table with colour-coded status badges
+- AI chat panel (routes to data agent or knowledge-base agent based on keywords)
+- Performance report modal (AI-generated, copyable)
 
-With FAST as a starting point and development framework, delivery scientists and engineers will accelerate their development process and deliver production quality AgentCore code following architecture and security best practices without having to learn any frontend or infrastructure code.
+### Backend (serverless)
+- **API Gateway** (REST) — `POST /generate`, `GET /readings`, `POST /chat`, `POST /report`
+- **DynamoDB** — `factory-sensor-readings` (PK: `machine_id`, SK: `timestamp`, TTL: 7 days)
+- **Kinesis Data Stream** — `factory-sensor-stream` (1 shard) — decouples generation from persistence
+- **S3** — `factory-sensor-raw` (raw JSON archive) · `factory-sensor-knowledgebase` (manual PDFs)
+- **Bedrock** — two agents + one knowledge base (see below)
 
-## FAST Baseline System
+### Lambda functions
 
-FAST comes deployable out-of-the-box with a fully functioning, full-stack application. This application represents starts as a basic multi-turn chat agent where the backend agent has access to tools. **Do not let this deter you, even if your use case is entirely different! If your application requires AgentCore, customizing FAST to any use case is extremely straightforward. That is the intended use of FAST!**
+| Function | Trigger | Purpose |
+|---|---|---|
+| `sensor-data-generator` | POST /generate | Generates 20 synthetic readings (4/machine) and puts them on Kinesis |
+| `sensor-data-processor` | Kinesis stream | Writes each record to DynamoDB and archives JSON to S3 |
+| `sensor-readings-fetcher` | GET /readings · Bedrock action group | Returns latest N readings for a machine; dual-format response |
+| `sensor-chat-handler` | POST /chat | Routes to data agent or KB agent based on keyword detection |
+| `sensor-report-handler` | POST /report | Fetches last 50 readings and calls Bedrock InvokeModel for a structured report |
 
-The application is intentionally kept very, very simple to allow developers to easily build up whatever they want on top of the baseline. The tools shipped out of the box include:
+### Bedrock resources (manual setup — see below)
 
-1. **Gateway Tools** - Lambda-based tools behind AgentCore Gateway with authentication:
-   - Text analysis tool (counts words and letter frequency)
-   
-2. **Code Interpreter** - Direct integration with Amazon Bedrock AgentCore Code Interpreter:
-   - Secure Python code execution in isolated sandbox
-   - Session management with state persistence
-   - Pre-built runtime with common libraries
+| Resource | Details |
+|---|---|
+| Knowledge Base `factory-sensor-kb` | S3 source (`factory-sensor-knowledgebase`), Titan Embeddings v2, OpenSearch Serverless |
+| Agent `factory-sensor-data-agent` | Action group backed by `sensor-readings-fetcher` |
+| Agent `factory-kb-agent` | Knowledge base `factory-sensor-kb` attached |
 
-Try asking the agent to analyze text or execute Python code to see these tools in action.
+Chat routing: messages containing `manual`, `procedure`, `specification`, `how to`, `safety`, `maintenance`, `troubleshoot`, `repair`, `spare part`, or `shutdown` go to the KB agent. All others go to the data agent.
 
+## Sensor data schema
 
-## FAST User Setup
+```json
+{
+  "machine_id": "Pump-01",
+  "timestamp": "2025-01-15T10:23:45.123Z",
+  "temperature_c": 95.4,
+  "vibration_mms": 2.1,
+  "pressure_bar": 5.2,
+  "rpm": 2200,
+  "status": "normal"
+}
+```
 
-If you are a delivery scientist or engineer who wants to use FAST to build a full stack application, this is the section for you.
+Normal operating ranges:
 
-FAST is designed to be forked and deployed out of the box with a security-approved baseline system working. Your task will be to customize it to create your own full stack application to to do (literally) anything on AgentCore.
+| Metric | Normal | Warning | Critical |
+|---|---|---|---|
+| Temperature (°C) | 60–120 | > 110 | > 140 |
+| Vibration (mm/s) | 0.5–3.0 | > 4 | > 6 |
+| Pressure (bar) | 2.0–8.0 | — | — |
+| RPM | 1000–3500 | — | — |
 
-Deploying the full stack out-of-the-box FAST baseline system is only a few cdk commands once you have forked the repo, namely: 
+## Deployment
+
+### Prerequisites
+- Node.js 20+
+- AWS CLI configured (`aws configure`)
+- CDK bootstrapped (`cdk bootstrap`)
+
+### 1 — Deploy infrastructure
 
 ```bash
 cd infra-cdk
 npm install
-cdk bootstrap # Once ever
 cdk deploy
-cd ..
-python scripts/deploy-frontend.py
 ```
 
-See the [deployment guide](docs/DEPLOYMENT.md) for detailed instructions on how to deploy FAST into an AWS account.
+Note the stack outputs — you'll need `FactoryApiUrl`, `CognitoUserPoolId`, and `CognitoClientId`.
 
-> **Terraform alternative:** FAST also supports Terraform for infrastructure deployment. See [`infra-terraform/README.md`](infra-terraform/README.md) for the Terraform deployment guide. We recommend choosing one infrastructure tool and deleting the other directory (`infra-cdk/` or `infra-terraform/`) from your fork to keep things clean.
+### 2 — Upload knowledge-base documents
 
-What comes next? That's up to you, the developer. With your requirements in mind, open up your coding assistant, describe what you'd like to do, and begin. The steering docs in this repository help guide coding assistants with best practices, and encourage them to always refer to the documentation built-in to the repository to make sure you end up building something great.
+```bash
+aws s3 cp infra-cdk/knowledge-base-docs/ \
+  s3://<factory-sensor-knowledgebase-bucket>/ --recursive
+```
 
-## Architecture
+### 3 — Create Bedrock resources (AWS Console)
 
-![Architecture Diagram](docs/architecture-diagram/FAST-architecture-20260403.png)
+#### Knowledge Base
+1. Bedrock → Knowledge Bases → Create
+2. Name: `factory-sensor-kb`
+3. Data source: S3 → select the `factory-sensor-knowledgebase` bucket
+4. Embeddings model: Titan Embeddings v2
+5. Vector store: OpenSearch Serverless (auto-create)
+6. Sync the data source after creation
 
-The out-of-the-box architecture is shown above. The diagram illustrates the authentication flows across the stack:
-1. User login to the frontend (Cognito User Pool — Authorization Code grant): The user authenticates with Cognito via the web application hosted on AWS Amplify. Cognito issues a JWT access token for the session.
-2. Frontend to AgentCore Runtime (Cognito User Pool JWT validation): The frontend passes the user's JWT in the Authorization header. The Runtime validates the token against the Cognito User Pool.
-3. AgentCore Runtime to AgentCore Gateway (OAuth2 Client Credentials / M2M): The Runtime authenticates as a service using the OAuth2 Client Credentials grant — independent of the user's identity. AgentCore Identity manages token retrieval via the Token Vault.
-4. Frontend to API Gateway (Cognito User Pool JWT validation): API requests are authenticated using a Cognito User Pools Authorizer with the same user JWT from Flow 1.
+#### Data Agent (`factory-sensor-data-agent`)
+1. Bedrock → Agents → Create
+2. Model: Claude Sonnet 4 (or equivalent)
+3. Instructions: *"You are a factory equipment analyst. Use the get_sensor_readings action to fetch live sensor data for any machine and answer questions about readings, status, trends, and anomalies."*
+4. Add action group → Lambda: `sensor-readings-fetcher`
+5. Define function: `get_sensor_readings` with parameters `machine_id` (string, required) and `limit` (integer, optional)
+6. Create an agent alias
 
-### Tech Stack
+#### KB Agent (`factory-kb-agent`)
+1. Bedrock → Agents → Create
+2. Model: Claude Sonnet 4 (or equivalent)
+3. Instructions: *"You are a factory equipment expert. Use the attached knowledge base to answer questions about machine manuals, operating procedures, maintenance schedules, safety protocols, and spare parts."*
+4. Associate knowledge base: `factory-sensor-kb`
+5. Create an agent alias
 
-- **Frontend**: React with TypeScript, Vite, Tailwind CSS, and shadcn components - infinitely flexible and ready for coding assistants
-- **Agent Providers**: Multiple agent providers supported (Strands, LangGraph, etc.) running within AgentCore Runtime
-- **Authentication**: AWS Cognito User Pool with OAuth support for easy swapping out Cognito
-- **Infrastructure**: CDK deployment with Amplify Hosting for frontend and AgentCore backend ([Terraform also supported](infra-terraform/README.md))
+### 4 — Set agent IDs on the chat Lambda
 
-## Project Structure
+```bash
+aws lambda update-function-configuration \
+  --function-name <sensor-chat-handler-name> \
+  --environment "Variables={
+    DYNAMODB_TABLE_NAME=<table>,
+    DATA_AGENT_ID=<data-agent-id>,
+    DATA_AGENT_ALIAS_ID=<data-agent-alias-id>,
+    KB_AGENT_ID=<kb-agent-id>,
+    KB_AGENT_ALIAS_ID=<kb-agent-alias-id>
+  }"
+```
+
+### 5 — Configure and deploy the frontend
+
+```bash
+cp frontend/.env.example frontend/.env.local
+# Edit frontend/.env.local with your values
+```
 
 ```
-fullstack-agentcore-solution-template/
-├── .amazonq/               # Amazon Q assistant rules
-├── .github/                # GitHub Actions workflows
-│   └── workflows/
-├── docker/                 # Docker development environment
-│   ├── docker-compose.yml  # Local development stack
-│   └── Dockerfile.frontend.dev # Frontend development container
-├── frontend/               # React frontend application
-│   ├── src/
-│   │   ├── app/            # Application pages
-│   │   ├── components/     # React components (shadcn/ui)
-│   │   ├── hooks/          # Custom React hooks
-│   │   ├── lib/            # Utility libraries
-│   │   │   └── agentcore-client/ # AgentCore streaming client
-│   │   ├── routes/         # React Router routes
-│   │   ├── services/       # API service layers
-│   │   ├── styles/         # Global styles
-│   │   ├── test/           # Frontend tests
-│   │   └── types/          # TypeScript type definitions
-│   ├── public/             # Static assets
-│   ├── components.json     # shadcn/ui configuration
-│   ├── vite.config.ts      # Vite configuration
-│   └── package.json
-├── infra-cdk/              # CDK infrastructure code
-│   ├── lib/                # CDK stack definitions
-│   │   ├── utils/          # Shared CDK utilities
+VITE_API_URL=https://<api-id>.execute-api.us-east-1.amazonaws.com/prod
+VITE_COGNITO_USER_POOL_ID=us-east-1_xxxxx
+VITE_COGNITO_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+```bash
+cd infra-cdk
+python ../scripts/deploy-frontend.py
+```
+
+## Project structure
+
+```
+.
+├── frontend/                    # React + Vite dashboard
+│   └── src/
+│       ├── components/dashboard/  # MachineSelector, ReadingsTable, FactoryChat, ReportModal
+│       ├── routes/ChatPage.tsx    # Main dashboard page
+│       └── services/factoryApi.ts # Typed API wrappers
+├── infra-cdk/
+│   ├── lib/
+│   │   ├── backend-stack.ts       # DynamoDB, Kinesis, S3, Lambdas, API Gateway
+│   │   ├── cognito-stack.ts       # Cognito User Pool
 │   │   ├── amplify-hosting-stack.ts
-│   │   ├── backend-stack.ts
-│   │   ├── cognito-stack.ts
-│   │   └── fast-main-stack.ts
-│   ├── bin/                # CDK app entry point
-│   ├── lambdas/            # Lambda function code
-│   │   ├── oauth2-provider/ # OAuth2 Credential Provider lifecycle
-│   │   ├── feedback/       # Feedback API handler
-│   │   └── zip-packager/   # Runtime ZIP packager
-│   └── config.yaml         # Deployment configuration
-├── infra-terraform/        # Terraform infrastructure (alternative to CDK)
-│   ├── modules/            # Terraform modules
-│   │   ├── amplify-hosting/ # Amplify Hosting module
-│   │   ├── cognito/        # Cognito User Pool module
-│   │   └── backend/        # Backend resources module
-│   ├── scripts/            # Terraform-specific deployment scripts
-│   ├── lambdas/            # Terraform-specific Lambda code
-│   ├── terraform.tfvars.example # Example variable file
-│   └── README.md           # Terraform deployment guide
-├── patterns/               # Agent pattern implementations
-│   ├── strands-single-agent/ # Basic strands agent pattern
-│   │   ├── basic_agent.py  # Agent implementation
-│   │   ├── strands_code_interpreter.py # Code Interpreter wrapper
-│   │   ├── requirements.txt # Agent dependencies
-│   │   └── Dockerfile      # Container configuration
-│   ├── langgraph-single-agent/ # LangGraph agent pattern
-│   │   ├── langgraph_agent.py # Agent implementation
-│   │   ├── requirements.txt # Agent dependencies
-│   │   └── Dockerfile      # Container configuration
-│   └── utils/              # Shared agent utilities
-│       ├── auth.py         # Authentication helpers
-│       └── ssm.py          # SSM parameter helpers
-├── tools/                  # Reusable tools (framework-agnostic)
-│   └── code_interpreter/   # AgentCore Code Interpreter integration
-│       └── code_interpreter_tools.py # Core implementation
-├── gateway/                # Gateway utilities and tools
-│   └── tools/              # Gateway tool implementations
-│       └── sample_tool/    # Example Gateway tool
-├── scripts/                # Deployment and utility scripts
-│   ├── deploy-frontend.py  # Cross-platform frontend deployment
-│   └── utils.py            # Shared script utilities
-├── test-scripts/           # Testing scripts
-│   ├── test-agent.py       # Agent testing
-│   ├── test-feedback-api.py # Feedback API testing
-│   ├── test-gateway.py     # Gateway testing
-│   └── test-memory.py      # Memory testing
-├── tests/                  # Test suite
-│   ├── unit/               # Unit tests
-│   ├── integration/        # Integration tests
-│   └── conftest.py         # Pytest configuration
-├── docs/                   # Documentation source files
-│   ├── architecture-diagram/ # Architecture diagrams
-│   ├── DEPLOYMENT.md       # Deployment guide
-│   ├── LOCAL_DEVELOPMENT.md # Local development guide
-│   ├── AGENT_CONFIGURATION.md # Agent setup guide
-│   ├── MEMORY_INTEGRATION.md # Memory integration guide
-│   ├── GATEWAY.md          # Gateway integration guide
-│   ├── RUNTIME_GATEWAY_AUTH.md # M2M authentication workflow
-│   ├── STREAMING.md        # Streaming implementation guide
-│   ├── TOOL_AC_CODE_INTERPRETER.md # Code Interpreter guide
-│   └── VERSION_BUMP_PLAYBOOK.md # Version management
-├── .mkdocs/                # MkDocs build configuration
-│   ├── mkdocs.yml          # MkDocs configuration
-│   ├── requirements.txt    # Documentation dependencies
-│   └── Makefile            # Build and deployment commands
-├── vibe-context/           # AI coding assistant context and rules
-│   ├── AGENTS.md           # Rules for AI assistants
-│   ├── coding-conventions.md # Code style guidelines
-│   └── development-best-practices.md # Development guidelines
-├── .kiro/                  # Kiro CLI configuration
-├── CHANGELOG.md            # Version history
-├── Makefile                # Project-level build commands
-└── README.md
+│   │   └── fast-main-stack.ts     # Root stack
+│   ├── lambdas/
+│   │   ├── sensor-data-generator/
+│   │   ├── sensor-data-processor/
+│   │   ├── sensor-readings-fetcher/
+│   │   ├── sensor-chat-handler/
+│   │   └── sensor-report-handler/
+│   └── knowledge-base-docs/       # pump-manual.txt, compressor-manual.txt, general-safety-procedures.txt
+└── scripts/
+    └── deploy-frontend.py
 ```
-
-## DeepWiki
-Have a question about how FAST works? Consider asking DeepWiki!
-
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/awslabs/fullstack-solution-template-for-agentcore)
 
 ## Security
 
-Note: this asset represents a proof-of-value for the services included and is not intended as a production-ready solution. You must determine how the AWS Shared Responsibility applies to their specific use case and implement the needed controls to achieve their desired security outcomes. AWS offers a broad set of security tools and configurations to enable our customers.
-
-Ultimately it is your responsibility as the developer of a full stack application to ensure all of its aspects are secure. We provide security best practices in repository documentation and provide a secure baseline but Amazon holds no responsibility for the security of applications built from this tool.
-
-## License
-
-This project is licensed under the Apache-2.0 License.
+This is a proof-of-concept and is not intended as a production-ready solution. CORS is open (`*`) and there is no API Gateway authorizer on the factory endpoints. Before production use, add a Cognito authorizer to the API Gateway routes and restrict CORS to your Amplify domain.
